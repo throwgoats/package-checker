@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Package Dependency Version Checker</title>
+</head>
+<body>
+  <h1>Package Dependency Version Checker</h1>
+
+  <section id="upload-section">
+    <h2>Upload package.json</h2>
+    <div id="drop-zone" style="border: 2px dashed #ccc; padding: 40px; text-align: center; cursor: pointer;">
+      <p>Drag and drop your package.json file here, or click to select</p>
+      <input type="file" id="file-input" accept=".json" style="display: none;">
+    </div>
+    <p id="file-status"></p>
+  </section>
+
+  <section id="controls-section" style="display: none;">
+    <button id="refresh-btn">Check for Updates</button>
+    <button id="clear-btn">Clear Data</button>
+    <p id="last-checked"></p>
+    <div id="progress-container" style="display: none;">
+      <p id="progress-text">Checking packages...</p>
+      <progress id="progress-bar" value="0" max="100"></progress>
+    </div>
+  </section>
+
+  <section id="results-section" style="display: none;">
+    <h2>Dependencies</h2>
+    <table id="deps-table" border="1" cellpadding="8" cellspacing="0">
+      <thead>
+        <tr>
+          <th>Package Name</th>
+          <th>Current Version</th>
+          <th>Latest Version</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>Dev Dependencies</h2>
+    <table id="dev-deps-table" border="1" cellpadding="8" cellspacing="0">
+      <thead>
+        <tr>
+          <th>Package Name</th>
+          <th>Current Version</th>
+          <th>Latest Version</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+
+    <h2>Summary</h2>
+    <ul id="summary-list"></ul>
+  </section>
+
+  <script>
+    // Constants
+    const STORAGE_KEY = 'package-checker-data';
+    const UNPKG_API = 'https://unpkg.com';
+
+    // DOM Elements
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    const fileStatus = document.getElementById('file-status');
+    const controlsSection = document.getElementById('controls-section');
+    const resultsSection = document.getElementById('results-section');
+    const refreshBtn = document.getElementById('refresh-btn');
+    const clearBtn = document.getElementById('clear-btn');
+    const lastChecked = document.getElementById('last-checked');
+    const depsTableBody = document.querySelector('#deps-table tbody');
+    const devDepsTableBody = document.querySelector('#dev-deps-table tbody');
+    const summaryList = document.getElementById('summary-list');
+    const progressContainer = document.getElementById('progress-container');
+    const progressBar = document.getElementById('progress-bar');
+    const progressText = document.getElementById('progress-text');
+
+    // State
+    let packageData = null;
+
+    // Initialize
+    init();
+
+    function init() {
+      setupEventListeners();
+      loadFromStorage();
+    }
+
+    function setupEventListeners() {
+      // Drag and drop
+      dropZone.addEventListener('click', () => fileInput.click());
+      dropZone.addEventListener('dragover', handleDragOver);
+      dropZone.addEventListener('drop', handleDrop);
+      fileInput.addEventListener('change', handleFileSelect);
+
+      // Buttons
+      refreshBtn.addEventListener('click', checkForUpdates);
+      clearBtn.addEventListener('click', clearData);
+    }
+
+    function handleDragOver(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.style.background = '#f0f0f0';
+    }
+
+    function handleDrop(e) {
+      e.preventDefault();
+      e.stopPropagation();
+      dropZone.style.background = '';
+
+      const files = e.dataTransfer.files;
+      if (files.length > 0) {
+        processFile(files[0]);
+      }
+    }
+
+    function handleFileSelect(e) {
+      const files = e.target.files;
+      if (files.length > 0) {
+        processFile(files[0]);
+      }
+    }
+
+    function processFile(file) {
+      if (!file.name.endsWith('.json')) {
+        fileStatus.textContent = 'Error: Please select a JSON file';
+        fileStatus.style.color = 'red';
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          const json = JSON.parse(e.target.result);
+          if (!json.dependencies && !json.devDependencies) {
+            throw new Error('No dependencies found in package.json');
+          }
+
+          packageData = {
+            name: json.name || 'Unknown',
+            dependencies: json.dependencies || {},
+            devDependencies: json.devDependencies || {},
+            lastChecked: null,
+            results: {}
+          };
+
+          fileStatus.textContent = `Loaded: ${file.name}`;
+          fileStatus.style.color = 'green';
+
+          saveToStorage();
+          controlsSection.style.display = 'block';
+          checkForUpdates();
+        } catch (error) {
+          fileStatus.textContent = `Error: ${error.message}`;
+          fileStatus.style.color = 'red';
+        }
+      };
+
+      reader.readAsText(file);
+    }
+
+    async function checkForUpdates() {
+      if (!packageData) return;
+
+      refreshBtn.disabled = true;
+      refreshBtn.textContent = 'Checking...';
+      fileStatus.textContent = 'Fetching latest versions...';
+      fileStatus.style.color = 'blue';
+
+      const allPackages = {
+        ...packageData.dependencies,
+        ...packageData.devDependencies
+      };
+
+      const packageNames = Object.keys(allPackages);
+      const totalPackages = packageNames.length;
+      let completedPackages = 0;
+
+      // Show progress bar
+      progressContainer.style.display = 'block';
+      progressBar.value = 0;
+      progressBar.max = totalPackages;
+      progressText.textContent = `Checking packages: 0 / ${totalPackages}`;
+
+      const results = {};
+
+      // Fetch versions in parallel
+      const promises = packageNames.map(async (packageName) => {
+        try {
+          const response = await fetch(`${UNPKG_API}/${packageName}/package.json`);
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+          }
+          const data = await response.json();
+          results[packageName] = {
+            current: allPackages[packageName],
+            latest: data.version,
+            error: null
+          };
+        } catch (error) {
+          results[packageName] = {
+            current: allPackages[packageName],
+            latest: null,
+            error: error.message
+          };
+        } finally {
+          // Update progress
+          completedPackages++;
+          progressBar.value = completedPackages;
+          progressText.textContent = `Checking packages: ${completedPackages} / ${totalPackages}`;
+        }
+      });
+
+      await Promise.all(promises);
+
+      packageData.results = results;
+      packageData.lastChecked = new Date().toISOString();
+
+      saveToStorage();
+      renderResults();
+
+      // Hide progress bar
+      progressContainer.style.display = 'none';
+
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = 'Check for Updates';
+      fileStatus.textContent = 'Update check complete!';
+      fileStatus.style.color = 'green';
+    }
+
+    function renderResults() {
+      if (!packageData || !packageData.results) return;
+
+      resultsSection.style.display = 'block';
+
+      // Update last checked timestamp
+      const date = new Date(packageData.lastChecked);
+      lastChecked.textContent = `Last checked: ${date.toLocaleString()}`;
+
+      // Clear tables
+      depsTableBody.innerHTML = '';
+      devDepsTableBody.innerHTML = '';
+      summaryList.innerHTML = '';
+
+      let outdatedCount = 0;
+      let upToDateCount = 0;
+      let errorCount = 0;
+
+      // Render dependencies
+      Object.keys(packageData.dependencies).forEach(packageName => {
+        const result = packageData.results[packageName];
+        if (result) {
+          const row = createTableRow(packageName, result);
+          depsTableBody.appendChild(row);
+          updateCounts(result);
+        }
+      });
+
+      // Render dev dependencies
+      Object.keys(packageData.devDependencies).forEach(packageName => {
+        const result = packageData.results[packageName];
+        if (result) {
+          const row = createTableRow(packageName, result);
+          devDepsTableBody.appendChild(row);
+          updateCounts(result);
+        }
+      });
+
+      function updateCounts(result) {
+        if (result.error) {
+          errorCount++;
+        } else if (isOutdated(result.current, result.latest)) {
+          outdatedCount++;
+        } else {
+          upToDateCount++;
+        }
+      }
+
+      // Render summary
+      const totalPackages = Object.keys(packageData.results).length;
+      summaryList.innerHTML = `
+        <li>Total packages: ${totalPackages}</li>
+        <li>Up to date: ${upToDateCount}</li>
+        <li>Outdated: ${outdatedCount}</li>
+        <li>Errors: ${errorCount}</li>
+      `;
+    }
+
+    function createTableRow(packageName, result) {
+      const row = document.createElement('tr');
+
+      const nameCell = document.createElement('td');
+      nameCell.textContent = packageName;
+
+      const currentCell = document.createElement('td');
+      currentCell.textContent = result.current;
+
+      const latestCell = document.createElement('td');
+      latestCell.textContent = result.latest || 'N/A';
+
+      const statusCell = document.createElement('td');
+
+      if (result.error) {
+        statusCell.textContent = `Error: ${result.error}`;
+        statusCell.style.color = 'orange';
+      } else if (isOutdated(result.current, result.latest)) {
+        statusCell.textContent = 'Outdated';
+        statusCell.style.color = 'red';
+        statusCell.style.fontWeight = 'bold';
+        row.style.background = '#ffe6e6';
+      } else {
+        statusCell.textContent = 'Up to date';
+        statusCell.style.color = 'green';
+      }
+
+      row.appendChild(nameCell);
+      row.appendChild(currentCell);
+      row.appendChild(latestCell);
+      row.appendChild(statusCell);
+
+      return row;
+    }
+
+    function isOutdated(current, latest) {
+      if (!latest) return false;
+
+      // Strip version prefix characters (^, ~, >=, etc.)
+      const cleanCurrent = current.replace(/^[\^~>=<]+/, '');
+      const cleanLatest = latest.replace(/^[\^~>=<]+/, '');
+
+      // Compare versions
+      return compareVersions(cleanCurrent, cleanLatest) < 0;
+    }
+
+    function compareVersions(v1, v2) {
+      const parts1 = v1.split('.').map(n => parseInt(n) || 0);
+      const parts2 = v2.split('.').map(n => parseInt(n) || 0);
+
+      const maxLength = Math.max(parts1.length, parts2.length);
+
+      for (let i = 0; i < maxLength; i++) {
+        const num1 = parts1[i] || 0;
+        const num2 = parts2[i] || 0;
+
+        if (num1 < num2) return -1;
+        if (num1 > num2) return 1;
+      }
+
+      return 0;
+    }
+
+    function saveToStorage() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(packageData));
+    }
+
+    function loadFromStorage() {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        try {
+          packageData = JSON.parse(stored);
+          fileStatus.textContent = `Loaded from storage: ${packageData.name}`;
+          fileStatus.style.color = 'green';
+          controlsSection.style.display = 'block';
+          renderResults();
+        } catch (error) {
+          console.error('Failed to load from storage:', error);
+        }
+      }
+    }
+
+    function clearData() {
+      if (confirm('Are you sure you want to clear all data?')) {
+        localStorage.removeItem(STORAGE_KEY);
+        packageData = null;
+        fileStatus.textContent = 'Data cleared';
+        fileStatus.style.color = 'gray';
+        controlsSection.style.display = 'none';
+        resultsSection.style.display = 'none';
+        depsTableBody.innerHTML = '';
+        devDepsTableBody.innerHTML = '';
+        summaryList.innerHTML = '';
+      }
+    }
+  </script>
+</body>
+</html>
